@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs'
 import * as path from 'node:path'
 import { ADO_RESOURCE, isValidOrgName } from '../ado/org'
 import { INVALID_ORG_NAME } from '../messages'
@@ -58,6 +59,11 @@ export function createAzCliProvider(deps: {
 }): AzCliProvider {
   const { azPath, run, home, fs } = deps
   const { profileDir, hasProfile, signOut } = createAzProfiles({ home, fs })
+  const pythonPath = path.resolve(path.dirname(azPath), '..', 'python.exe')
+  // The MSI's extensionless az is Bash, and az.cmd cannot be spawned directly.
+  const usePython = process.platform === 'win32' && /^az(?:\.cmd)?$/i.test(path.basename(azPath)) && existsSync(pythonPath)
+  const command = usePython ? pythonPath : azPath
+  const prefix = usePython ? ['-IBm', 'azure.cli'] : []
 
   function azEnv(dir: string): Record<string, string> {
     const env: Record<string, string> = {}
@@ -69,6 +75,7 @@ export function createAzCliProvider(deps: {
       AZURE_CONFIG_DIR: dir,
       AZURE_CORE_COLLECT_TELEMETRY: 'false',
       AZURE_CORE_ONLY_SHOW_ERRORS: 'true',
+      ...(usePython ? { AZ_INSTALLER: 'MSI' } : {}),
       ...deps.extraEnv?.()
     }
   }
@@ -82,7 +89,7 @@ export function createAzCliProvider(deps: {
       await fs.mkdir(dir, { recursive: true, mode: PROFILE_MODE })
       await fs.chmod(dir, PROFILE_MODE)
       const args = ['login', ...tenantArgs(tenantId), '--allow-no-subscriptions', '--output', 'none']
-      const result = await run(azPath, args, { env: azEnv(dir), signal, timeoutMs: LOGIN_TIMEOUT_MS })
+      const result = await run(command, [...prefix, ...args], { env: azEnv(dir), signal, timeoutMs: LOGIN_TIMEOUT_MS })
       if (result.code !== 0) throw failure('Azure CLI sign-in failed', result.stderr)
     },
 
@@ -90,7 +97,7 @@ export function createAzCliProvider(deps: {
       const dir = profileDir(org)
       if (!(await hasProfile(org))) throw new Error(NOT_SIGNED_IN)
       const args = ['account', 'get-access-token', '--resource', ADO_RESOURCE, ...tenantArgs(tenantId), '--output', 'json']
-      const result = await run(azPath, args, { env: azEnv(dir), timeoutMs: TOKEN_TIMEOUT_MS }).catch((error: unknown) => {
+      const result = await run(command, [...prefix, ...args], { env: azEnv(dir), timeoutMs: TOKEN_TIMEOUT_MS }).catch((error: unknown) => {
         throw new Error(TOKEN_FAILED, { cause: error })
       })
       if (result.code !== 0) throw failure(TOKEN_FAILED, result.stderr)

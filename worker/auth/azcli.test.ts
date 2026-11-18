@@ -96,6 +96,42 @@ test('login without a tenant omits --tenant', async () => {
   assert.deepEqual(runs[0].args, ['login', '--allow-no-subscriptions', '--output', 'none'])
 })
 
+test('Windows MSI login and token requests run the bundled Python without a shell', async () => {
+  if (process.platform !== 'win32') return
+  const home = await realFs.mkdtemp(path.join(os.tmpdir(), 'azcli-msi-'))
+  try {
+    const bin = path.join(home, 'Azure CLI', 'wbin')
+    const python = path.join(home, 'Azure CLI', 'python.exe')
+    await realFs.mkdir(bin, { recursive: true })
+    await realFs.writeFile(python, '')
+    for (const name of ['az', 'az.cmd']) {
+      const runs: { file: string; args: string[]; opts: RunOptions }[] = []
+      const provider = createAzCliProvider({
+        azPath: path.join(bin, name),
+        home,
+        fs: realFs,
+        run: async (file, args, opts) => {
+          runs.push({ file, args, opts })
+          return { code: 0, stdout: TOKEN_JSON, stderr: '' }
+        }
+      })
+      await provider.login('contoso', 't1')
+      assert.deepEqual(await provider.getToken('contoso', 't1'), { token: 'tok', expiresAt: 1793710000000 })
+      assert.equal(runs.length, 2)
+      for (const call of runs) {
+        assert.equal(call.file, python)
+        assert.deepEqual(call.args.slice(0, 2), ['-IBm', 'azure.cli'])
+        assert.equal(call.opts.env?.AZ_INSTALLER, 'MSI')
+        assert.equal(call.opts.env?.AZURE_CONFIG_DIR, provider.profileDir('contoso'))
+      }
+      assert.deepEqual(runs[0].args.slice(2), ['login', '--tenant', 't1', '--allow-no-subscriptions', '--output', 'none'])
+      assert.deepEqual(runs[1].args.slice(2), ['account', 'get-access-token', '--resource', ADO_RESOURCE, '--tenant', 't1', '--output', 'json'])
+    }
+  } finally {
+    await realFs.rm(home, { recursive: true, force: true })
+  }
+})
+
 test('login creates the profile and locks its mode before az runs', async () => {
   const { provider, events, chmods } = harness()
   await provider.login('contoso', 't1')
