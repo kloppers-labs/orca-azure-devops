@@ -46,6 +46,7 @@ export interface PipelinesServiceDeps {
 export interface PipelinesService {
   onOrgs(orgs: OrgStatus[]): void
   snapshot(org: string): Promise<RunsSnapshot>
+  preview(org: string): Promise<RunsSnapshot>
   refresh(org: string): Promise<RunsSnapshot>
   reloadFresh(org: string): Promise<RunsSnapshot>
   watch(input: { org: string; projectId: string; buildId: number; watched: boolean }): Promise<RunsSnapshot>
@@ -75,6 +76,8 @@ interface OrgRuns {
   watched: RunKey[]
   restored: boolean
   restoring?: Promise<RunsSnapshot | null>
+  partial: RunsSnapshot | null
+  previewWaiters: Set<(snapshot: RunsSnapshot) => void>
 }
 
 const RUNS_MS = { visibleMs: 30_000, backgroundMs: 300_000, quietMax: 4, quietCapMs: NOTIFY_CAP_MS }
@@ -83,6 +86,7 @@ const WATCH_SKIP_MS = 30_000
 const FRESH_MS = 30_000
 const FORBIDDEN_PAUSE_MS = 10 * 60_000
 const MAX_RUNS = 100
+const PREVIEW_INTERVAL_MS = 250
 
 export function createPipelinesService(deps: PipelinesServiceDeps): PipelinesService {
   const { scheduler, now } = deps
@@ -114,7 +118,9 @@ export function createPipelinesService(deps: PipelinesServiceDeps): PipelinesSer
       watching: null,
       pausedUntil: -Infinity,
       watched: [],
-      restored: false
+      restored: false,
+      partial: null,
+      previewWaiters: new Set()
     }
     entries.set(org, entry)
     return entry
@@ -221,7 +227,23 @@ export function createPipelinesService(deps: PipelinesServiceDeps): PipelinesSer
     if (forbidden) entry.pausedUntil = now() + FORBIDDEN_PAUSE_MS
     entry.failure = forbidden ? new AdoError('forbidden', 403, RUNS_NEED_BUILD_READ) : loadFailure(error, RUNS_LOAD_FAILED)
     if (entry.base) publish(entry, { ...entry.base, stale: true, message: forbidden ? RUNS_NEED_BUILD_READ : failureMessage(error, RUNS_LOAD_FAILED) })
+    if (entry.partial) {
+      deps.post({ ...entry.partial, loading: false, stale: true, message: entry.failure.message })
+      entry.partial = null
+    }
     return entry.failure
+  }
+
+  function previewProgress(org: string, entry: OrgRuns, me: string, read: () => RunsLoad): void {
+    if (entry.controller.signal.aborted || (entry.previewWaiters.size === 0 && !entry.partial)) return
+    if (entry.partial && now() - entry.partial.updatedAt < PREVIEW_INTERVAL_MS) return
+    const loaded = read()
+    if (loaded.runs.length === 0) return
+    const partial = capRunsSnapshot({ ...compose(org, me, loaded.runs, offMessage(loaded)), loading: true })
+    entry.partial = partial
+    deps.post(partial)
+    for (const resolve of entry.previewWaiters) resolve(partial)
+    entry.previewWaiters.clear()
   }
 
   function load(org: string, kind: Kind): Promise<RunsSnapshot> {
@@ -266,7 +288,9 @@ export function createPipelinesService(deps: PipelinesServiceDeps): PipelinesSer
       const projects = await entry.projects(status.codeProjects, signal)
       const watched = await deps.watchList.list(org)
       entry.watched = watched
-      const loaded = kind === 'full' ? await entry.source.full(me, projects, watched, all, signal) : await entry.source.background(me, projects, watched, false, signal)
+      const loaded = kind === 'full'
+        ? await entry.source.full(me, projects, watched, all, signal, next => previewProgress(org, entry, me, next))
+        : await entry.source.background(me, projects, watched, false, signal, next => previewProgress(org, entry, me, next))
       signal.throwIfAborted()
       if (kind === 'full') Object.assign(entry, { fullAt: now(), restored: false })
       entry.failure = null
@@ -274,6 +298,7 @@ export function createPipelinesService(deps: PipelinesServiceDeps): PipelinesSer
       const base = compose(org, me, runs, offMessage(loaded))
       if (kind === 'full') deps.persisted.save(org, 'runs', me, capRunsSnapshot(base, VALUE_BUDGET_BYTES))
       deps.savedTables.save(org, me)
+      if (kind === 'full') entry.partial = null
       return publish(entry, base)
     } catch (error) {
       if (signal.aborted) throw notConnected()
@@ -413,6 +438,22 @@ export function createPipelinesService(deps: PipelinesServiceDeps): PipelinesSer
     },
 
     snapshot,
+
+    async preview(org) {
+      const entry = entryOf(org)
+      if (lastFull(org)) return snapshot(org)
+      if (entry.partial) return entry.partial
+      let resolveFirst!: (snapshot: RunsSnapshot) => void
+      const first = new Promise<RunsSnapshot>(resolve => {
+        resolveFirst = resolve
+        entry.previewWaiters.add(resolve)
+      })
+      try {
+        return await Promise.race([snapshot(org), first])
+      } finally {
+        entry.previewWaiters.delete(resolveFirst)
+      }
+    },
 
     async refresh(org) {
       await statusOf(org)

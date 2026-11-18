@@ -1,4 +1,4 @@
-import { Callout, read, Skeleton, Stack, Text, type OrcaNode } from 'orca'
+import { atom, Button, Callout, read, Row, Skeleton, Stack, Text, update, type OrcaNode } from 'orca'
 import type { RunFilter, RunsSnapshot, RunSummary } from '../../shared/pipelines'
 import { failedRuns, isActive, needsMe, runCounts, runsFor } from '../../shared/runs'
 import type { OrgStatus } from '../../shared/types'
@@ -15,6 +15,7 @@ import { RunCard } from './run-card'
 import { load, notice, refresh, refreshing, retryLoad, runFilter, runPlaces, selectFilter, snapshot } from './state'
 
 const MAX_RUNS = 30
+const pages = atom<Record<string, number>>({})
 
 const FILTERS: { id: RunFilter; label: string }[] = [
   { id: 'mine', label: 'Mine' },
@@ -95,8 +96,11 @@ function hintOf(runs: readonly RunSummary[], failed: ReadonlySet<number>): strin
 
 function Runs({ view, current, choices, now }: { view: View; current: RunsSnapshot; choices: Choices; now: number }): OrcaNode {
   const runs = inScope(runsFor(view.filter, current.runs, now), runPlaces, choices.scope)
-  if (runs.length === 0) return <ScopedEmpty choices={choices} title={EMPTY[view.filter].title} description={EMPTY[view.filter].description} />
-  const shown = runs.slice(0, MAX_RUNS)
+  if (runs.length === 0) return current.loading ? <Skeleton lines={3} label="Loading pipeline runs" /> : <ScopedEmpty choices={choices} title={EMPTY[view.filter].title} description={EMPTY[view.filter].description} />
+  const pageKey = JSON.stringify([view.org, view.filter, choices.scope])
+  const offset = Math.min(read(pages)[pageKey] ?? 0, Math.floor((runs.length - 1) / MAX_RUNS) * MAX_RUNS)
+  const shown = runs.slice(offset, offset + MAX_RUNS)
+  const goTo = (next: number): void => update(pages, current => ({ ...current, [pageKey]: next }))
   const layout: Layout<RunSummary> = {
     count: items => counted(items.length, 'run', 'runs'),
     hint: items => hintOf(items, view.failed),
@@ -105,10 +109,16 @@ function Runs({ view, current, choices, now }: { view: View; current: RunsSnapsh
   return (
     <Stack gap="sm">
       <Groups org={view.org} tab="pipelines" grouped={groupByPlace(shown, runPlaces)} layout={layout} />
-      {shown.length < runs.length ? (
-        <Text size="sm" muted>
-          {`Showing ${shown.length} of ${runs.length} runs.`}
-        </Text>
+      {runs.length > MAX_RUNS ? (
+        <Stack gap="xs">
+          <Text size="sm" muted>
+            {offset === 0 ? `Showing ${shown.length} of ${runs.length} runs.` : `Showing runs ${offset + 1}-${offset + shown.length} of ${runs.length}.`}
+          </Text>
+          <Row gap="xs">
+            {offset > 0 ? <Button size="sm" variant="outline" onPress={() => goTo(offset - MAX_RUNS)}>Previous runs</Button> : null}
+            {offset + shown.length < runs.length ? <Button size="sm" variant="outline" onPress={() => goTo(offset + MAX_RUNS)}>Show more runs</Button> : null}
+          </Row>
+        </Stack>
       ) : null}
     </Stack>
   )
@@ -134,6 +144,7 @@ export function PipelinesTab({ org }: { org: OrgStatus }): OrcaNode {
     <Stack gap="md">
       <Toolbar org={org.org} filter={filter} current={current} choices={choices} now={now} />
       {failure ? <Callout tone="danger">{failure}</Callout> : null}
+      {current.loading ? <Text size="sm" muted>Loading more runs and stage details...</Text> : null}
       <Runs view={{ org: org.org, me: current.me, filter, failed }} current={current} choices={choices} now={now} />
     </Stack>
   )
