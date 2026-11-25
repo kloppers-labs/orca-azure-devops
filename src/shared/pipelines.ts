@@ -64,6 +64,7 @@ export interface RunsSnapshot {
   counts: RunCounts
   updatedAt: number
   stale: boolean
+  loading?: boolean
   message?: string
 }
 

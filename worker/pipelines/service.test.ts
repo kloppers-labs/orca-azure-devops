@@ -323,6 +323,87 @@ test('a waiting run carries its approval with the stage and environment', async 
   assert.deepEqual(h.posts, [snapshot])
 })
 
+test('a preview returns runs before other projects or their stage details finish loading', async () => {
+  const h = harness()
+  let release!: () => void
+  const held = new Promise<void>(resolve => { release = resolve })
+  h.ado.on(
+    call => runsProjectOf(call) === PLATFORM && (isMineRuns(call) || isRunningRuns(call) || isApprovals(call)),
+    async () => {
+      await held
+      return json(200, { value: [] })
+    }
+  )
+  h.ado.on(isTimeline, async call => {
+    await held
+    return json(200, h.ado.runs.timelines.get(buildIdOf(call)) ?? { changeId: 0, records: [] })
+  })
+
+  const preview = await h.service.preview(ORG)
+  assert.equal(preview.loading, true)
+  assert.ok(preview.runs.some(run => run.buildId === 4520))
+  assert.ok(preview.runs.every(run => run.stages === null))
+  assert.deepEqual(h.updates, [], 'partial results must not trigger notifications')
+  let complete = false
+  const full = h.service.snapshot(ORG).then(snapshot => { complete = true; return snapshot })
+  await drain()
+  assert.equal(complete, false, 'the full load is still blocked')
+
+  release()
+  const snapshot = await full
+  assert.equal(snapshot.loading, undefined)
+  assert.deepEqual(ids(snapshot.runs), [4531, 4520, 4512, 4505, 4498, 4490])
+  assert.equal(runOf(snapshot, 4520).approvals[0].environment, 'production')
+  assert.ok(runOf(snapshot, 4520).stages?.length)
+  assert.deepEqual(h.posts.at(-1), snapshot)
+  assert.equal(h.updates.length, 1, 'only the completed snapshot updates notifications')
+})
+
+test('a failure after a preview keeps the rows and ends the loading indicator with an error', async () => {
+  const h = harness()
+  let release!: () => void
+  const held = new Promise<void>(resolve => { release = resolve })
+  h.ado.on(isTimeline, async () => {
+    await held
+    return json(403, { message: 'Build access was removed.' })
+  })
+  const preview = await h.service.preview(ORG)
+  assert.equal(preview.loading, true)
+  const full = rejection(h.service.snapshot(ORG))
+  release()
+  await full
+  const failed = h.posts.at(-1)
+  assert.equal(failed?.loading, false)
+  assert.equal(failed?.stale, true)
+  assert.equal(failed?.message, NEED_BUILD_READ)
+  assert.ok(failed?.runs.some(run => run.buildId === 4520))
+})
+
+test('opening Pipelines during a background load can already show that load progress', async () => {
+  const h = harness()
+  let release!: () => void
+  const held = new Promise<void>(resolve => { release = resolve })
+  h.ado.on(isApprovals, async () => {
+    await held
+    return json(200, { value: [] })
+  })
+  h.ado.on(isMineRuns, async call => {
+    await held
+    const builds = [...h.ado.runs.builds.values()].filter(build => build.project.id === runsProjectOf(call) && build.requestedFor?.id === ME)
+    return json(200, { value: builds })
+  })
+  h.setOrgs([status()])
+  await h.clock.tick(0)
+  let finished = false
+  const preview = h.service.preview(ORG).then(snapshot => { finished = true; return snapshot })
+  await drain()
+  assert.equal(finished, false)
+  release()
+  assert.equal((await preview).loading, true)
+  await h.service.snapshot(ORG)
+  assert.equal(h.posts.at(-1)?.loading, undefined)
+})
+
 test('Needs me and Failed come from the shared rules', async () => {
   const h = harness()
   const snapshot = await h.service.snapshot(ORG)

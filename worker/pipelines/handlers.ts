@@ -13,7 +13,7 @@ export interface PipelineHandlerDeps {
 }
 
 export function registerPipelineHandlers(orca: OrcaWorkerApi, { pipelines, actions, views, openRun, openFile }: PipelineHandlerDeps): void {
-  orca.panels.handle('runs.snapshot', input => pipelines.snapshot(input.org))
+  orca.panels.handle('runs.snapshot', input => pipelines.preview(input.org))
   orca.panels.handle('runs.refresh', input => pipelines.refresh(input.org))
   orca.panels.handle('runs.watch', input => pipelines.watch(input))
   orca.panels.handle('runs.decide', input => actions.decide(input))

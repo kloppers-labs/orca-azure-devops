@@ -889,13 +889,38 @@ test('runs of others leave Mine empty while Running still lists them', async () 
   assert.deepEqual(ids(), [1])
 })
 
-test('more than 30 runs shows the cap note', async () => {
+test('more than 30 runs are drawn one page at a time on demand', async () => {
   const runs = Array.from({ length: 45 }, (_, index) => runOf(1000 + index, { finishedAt: NOW - (index + 1) * MINUTE }))
   await open(runsSnapshotOf({ runs }))
   assert.equal(ids().length, 30)
   assert.equal(ids()[0], 1000)
   assert.equal(ids()[29], 1029)
   assert.equal(panel.find({ type: 'Text', text: 'Showing 30 of 45 runs.' })?.props.muted, true)
+  await panel.press({ type: 'Button', text: 'Show more runs' })
+  assert.deepEqual(ids(), runs.slice(30).map(run => run.buildId))
+  assert.equal(panel.find({ type: 'Text', text: 'Showing runs 31-45 of 45.' })?.props.muted, true)
+  assert.equal(panel.find({ type: 'Button', text: 'Show more runs' }), null)
+  await panel.press({ type: 'Button', text: 'Previous runs' })
+  assert.deepEqual(ids(), runs.slice(0, 30).map(run => run.buildId))
+})
+
+test('partial pipeline results are visible while details load and empty filters do not claim there are no runs', async () => {
+  await open(runsSnapshotOf({ runs: [runOf(1)], loading: true }))
+  assert.deepEqual(ids(), [1])
+  assert.ok(panel.find({ type: 'Text', text: 'Loading more runs and stage details...' }))
+  await panel.press({ type: 'Button', text: 'Running' })
+  assert.equal(panel.find({ type: 'EmptyState' }), null)
+  assert.ok(panel.find({ type: 'Skeleton', label: 'Loading pipeline runs' }))
+  await panel.post('runs.changed', runsSnapshotOf({ runs: [runOf(1)] }))
+  assert.equal(panel.find({ type: 'Text', text: 'Loading more runs and stage details...' }), null)
+  assert.equal(panel.find({ type: 'EmptyState' })?.label, EMPTY.running[0])
+})
+
+test('a late preview cannot replace the completed snapshot at the same timestamp', async () => {
+  await open(runsSnapshotOf({ runs: [runOf(1), runOf(2)] }))
+  await panel.post('runs.changed', runsSnapshotOf({ runs: [runOf(1)], loading: true }))
+  assert.deepEqual(ids(), [2, 1])
+  assert.equal(panel.find({ type: 'Text', text: 'Loading more runs and stage details...' }), null)
 })
 
 test('thirty runs show no cap note', async () => {

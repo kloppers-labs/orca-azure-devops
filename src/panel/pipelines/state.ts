@@ -50,7 +50,7 @@ async function loadSnapshot(org: string): Promise<void> {
   try {
     const next = await plugin.request('runs.snapshot', { org })
     if (read(source) !== org) return
-    set(snapshot, next)
+    if (!isOlderPreview(next)) set(snapshot, next)
     set(load, { status: 'ready' })
   } catch (error) {
     if (read(source) === org) set(load, { status: 'failed', message: messageOf(error) })
@@ -79,8 +79,14 @@ export const syncPipelines = (org: OrgStatus | null, onScreen: boolean): void =>
 
 export function acceptRuns(next: RunsSnapshot): void {
   if (read(source) !== next.org) return
+  if (isOlderPreview(next)) return
   set(snapshot, next)
   set(load, { status: 'ready' })
+}
+
+function isOlderPreview(next: RunsSnapshot): boolean {
+  const current = read(snapshot)
+  return next.loading === true && current?.org === next.org && !current.loading && current.updatedAt >= next.updatedAt
 }
 
 export function retryLoad(): void {
