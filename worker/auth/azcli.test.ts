@@ -96,6 +96,92 @@ test('login without a tenant omits --tenant', async () => {
   assert.deepEqual(runs[0].args, ['login', '--allow-no-subscriptions', '--output', 'none'])
 })
 
+async function withMsiFolders(body: (folders: { home: string; root: string }) => Promise<void>): Promise<void> {
+  const home = await realFs.mkdtemp(path.join(os.tmpdir(), 'azcli-msi-'))
+  try {
+    await body({ home, root: path.join(home, 'Azure CLI') })
+  } finally {
+    await realFs.rm(home, { recursive: true, force: true })
+  }
+}
+
+async function loginAndGetToken(azPath: string, home: string, platform: NodeJS.Platform) {
+  const runs: { file: string; args: string[]; opts: RunOptions }[] = []
+  const provider = createAzCliProvider({
+    azPath,
+    home,
+    fs: realFs,
+    platform,
+    run: async (file, args, opts) => {
+      runs.push({ file, args, opts })
+      return { code: 0, stdout: TOKEN_JSON, stderr: '' }
+    }
+  })
+  await provider.login('contoso', 't1')
+  assert.deepEqual(await provider.getToken('contoso', 't1'), { token: 'tok', expiresAt: 1793710000000 })
+  return { provider, runs }
+}
+
+function assertRunsAzDirectly(runs: { file: string; args: string[]; opts: RunOptions }[], azPath: string) {
+  assert.equal(runs.length, 2)
+  for (const call of runs) {
+    assert.equal(call.file, azPath)
+    assert.equal(call.opts.env?.AZ_INSTALLER, undefined)
+  }
+  assert.deepEqual(runs[0].args, ['login', '--tenant', 't1', '--allow-no-subscriptions', '--output', 'none'])
+  assert.deepEqual(runs[1].args, ['account', 'get-access-token', '--resource', ADO_RESOURCE, '--tenant', 't1', '--output', 'json'])
+}
+
+test('Windows MSI login and token requests run the bundled Python without a shell', async () => {
+  await withMsiFolders(async ({ home, root }) => {
+    const bin = path.join(root, 'wbin')
+    const python = path.join(root, 'python.exe')
+    await realFs.mkdir(bin, { recursive: true })
+    await realFs.writeFile(python, '')
+    for (const name of ['az', 'az.cmd', 'AZ.CMD']) {
+      const { provider, runs } = await loginAndGetToken(path.join(bin, name), home, 'win32')
+      assert.equal(runs.length, 2)
+      for (const call of runs) {
+        assert.equal(call.file, python)
+        assert.deepEqual(call.args.slice(0, 2), ['-IBm', 'azure.cli'])
+        assert.equal(call.opts.env?.AZ_INSTALLER, 'MSI')
+        assert.equal(call.opts.env?.AZURE_CONFIG_DIR, provider.profileDir('contoso'))
+      }
+      assert.deepEqual(runs[0].args.slice(2), ['login', '--tenant', 't1', '--allow-no-subscriptions', '--output', 'none'])
+      assert.deepEqual(runs[1].args.slice(2), ['account', 'get-access-token', '--resource', ADO_RESOURCE, '--tenant', 't1', '--output', 'json'])
+    }
+  })
+})
+
+test('on Windows, an az outside a wbin folder runs directly even with python.exe one level up', async () => {
+  await withMsiFolders(async ({ home, root }) => {
+    const bin = path.join(root, 'bin')
+    await realFs.mkdir(bin, { recursive: true })
+    await realFs.writeFile(path.join(root, 'python.exe'), '')
+    const azPath = path.join(bin, 'az')
+    assertRunsAzDirectly((await loginAndGetToken(azPath, home, 'win32')).runs, azPath)
+  })
+})
+
+test('on Windows, a wbin az without python.exe runs directly', async () => {
+  await withMsiFolders(async ({ home, root }) => {
+    const bin = path.join(root, 'wbin')
+    await realFs.mkdir(bin, { recursive: true })
+    const azPath = path.join(bin, 'az')
+    assertRunsAzDirectly((await loginAndGetToken(azPath, home, 'win32')).runs, azPath)
+  })
+})
+
+test('on macOS, the full MSI layout still runs az directly', async () => {
+  await withMsiFolders(async ({ home, root }) => {
+    const bin = path.join(root, 'wbin')
+    await realFs.mkdir(bin, { recursive: true })
+    await realFs.writeFile(path.join(root, 'python.exe'), '')
+    const azPath = path.join(bin, 'az')
+    assertRunsAzDirectly((await loginAndGetToken(azPath, home, 'darwin')).runs, azPath)
+  })
+})
+
 test('login creates the profile and locks its mode before az runs', async () => {
   const { provider, events, chmods } = harness()
   await provider.login('contoso', 't1')

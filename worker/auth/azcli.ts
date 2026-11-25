@@ -55,11 +55,20 @@ export function createAzCliProvider(deps: {
   home: string
   fs: Pick<typeof import('node:fs/promises'), 'mkdir' | 'rm' | 'chmod' | 'stat'>
   extraEnv?: () => Record<string, string>
+  platform?: NodeJS.Platform
 }): AzCliProvider {
-  const { azPath, run, home, fs } = deps
+  const { azPath, run, home, fs, platform = process.platform } = deps
   const { profileDir, hasProfile, signOut } = createAzProfiles({ home, fs })
+  let launcher: Promise<Launcher> | undefined
 
-  function azEnv(dir: string): Record<string, string> {
+  function resolveLauncher(): Promise<Launcher> {
+    launcher ??= msiPython(azPath, platform, fs).then((python): Launcher =>
+      python ? { command: python, prefix: ['-IBm', 'azure.cli'], env: { AZ_INSTALLER: 'MSI' } } : { command: azPath, prefix: [], env: {} }
+    )
+    return launcher
+  }
+
+  function azEnv(dir: string, launcherEnv: Record<string, string>): Record<string, string> {
     const env: Record<string, string> = {}
     for (const [key, value] of Object.entries(process.env)) {
       if (value !== undefined) env[key] = value
@@ -69,6 +78,7 @@ export function createAzCliProvider(deps: {
       AZURE_CONFIG_DIR: dir,
       AZURE_CORE_COLLECT_TELEMETRY: 'false',
       AZURE_CORE_ONLY_SHOW_ERRORS: 'true',
+      ...launcherEnv,
       ...deps.extraEnv?.()
     }
   }
@@ -82,7 +92,8 @@ export function createAzCliProvider(deps: {
       await fs.mkdir(dir, { recursive: true, mode: PROFILE_MODE })
       await fs.chmod(dir, PROFILE_MODE)
       const args = ['login', ...tenantArgs(tenantId), '--allow-no-subscriptions', '--output', 'none']
-      const result = await run(azPath, args, { env: azEnv(dir), signal, timeoutMs: LOGIN_TIMEOUT_MS })
+      const { command, prefix, env } = await resolveLauncher()
+      const result = await run(command, [...prefix, ...args], { env: azEnv(dir, env), signal, timeoutMs: LOGIN_TIMEOUT_MS })
       if (result.code !== 0) throw failure('Azure CLI sign-in failed', result.stderr)
     },
 
@@ -90,7 +101,8 @@ export function createAzCliProvider(deps: {
       const dir = profileDir(org)
       if (!(await hasProfile(org))) throw new Error(NOT_SIGNED_IN)
       const args = ['account', 'get-access-token', '--resource', ADO_RESOURCE, ...tenantArgs(tenantId), '--output', 'json']
-      const result = await run(azPath, args, { env: azEnv(dir), timeoutMs: TOKEN_TIMEOUT_MS }).catch((error: unknown) => {
+      const { command, prefix, env } = await resolveLauncher()
+      const result = await run(command, [...prefix, ...args], { env: azEnv(dir, env), timeoutMs: TOKEN_TIMEOUT_MS }).catch((error: unknown) => {
         throw new Error(TOKEN_FAILED, { cause: error })
       })
       if (result.code !== 0) throw failure(TOKEN_FAILED, result.stderr)
@@ -100,6 +112,25 @@ export function createAzCliProvider(deps: {
     },
 
     signOut
+  }
+}
+
+interface Launcher {
+  command: string
+  prefix: string[]
+  env: Record<string, string>
+}
+
+// The MSI's extensionless az is Bash, and az.cmd cannot be spawned directly.
+async function msiPython(azPath: string, platform: NodeJS.Platform, fs: Pick<typeof import('node:fs/promises'), 'stat'>): Promise<string | null> {
+  const bin = path.dirname(azPath)
+  if (platform !== 'win32' || !/^az(?:\.cmd)?$/i.test(path.basename(azPath)) || path.basename(bin).toLowerCase() !== 'wbin') return null
+  const python = path.resolve(bin, '..', 'python.exe')
+  try {
+    await fs.stat(python)
+    return python
+  } catch {
+    return null
   }
 }
 
